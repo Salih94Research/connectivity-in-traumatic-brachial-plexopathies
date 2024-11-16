@@ -1,0 +1,42 @@
+mrconvert dwi_$NAME.nii dwi.mif -fslgrad dwi_$NAME.bvec dwi_$NAME.bval 
+dwidenoise dwi.mif dwi_denoised.mif -noise noise.mif 
+
+############################## IN CASE OF GIBBS-RINGING ARTIFACTS ###############################
+mrdegibbs dwi_denoised.mif dwi_denoised_unringed.mif -axes 0,1 
+############################## CORRECTIONS FOR EDDY-CURRENTS DISTORTIONS ###############################
+dwifslpreproc dwi_denoised.mif dwi_preproc.mif -nocleanup -pe_dir AP -rpe_none -eddy_options " --slm=linear --data_is_shelled" 
+
+
+dwibiascorrect ants dwi_preproc.mif dwi_preproc_unbiased.mif -bias bias.mif 
+dwi2mask dwi_preproc_unbiased.mif mask.mif 
+dwi2response dhollander dwi_preproc_unbiased.mif wm.txt gm.txt csf.txt -voxels voxels.mif 
+mrgrid dwi_preproc_unbiased.mif regrid dwi_preproc_unbiased_upsampled.mif -voxel 1.25 
+dwi2mask dwi_preproc_unbiased_upsampled.mif mask_upsampled.mif 
+dwi2fod msmt_csd dwi_preproc_unbiased_upsampled.mif -mask mask_upsampled.mif wm.txt wmfod.mif gm.txt gmfod.mif csf.txt csffod.mif 
+mrconvert -coord 3 0 wmfod.mif - | mrcat csffod.mif gmfod.mif - vf.mif 
+mtnormalise wmfod.mif wmfod_norm.mif gmfod.mif gmfod_norm.mif csffod.mif csffod_norm.mif -mask mask_upsampled.mif 
+
+############################## CO-REGISTRATION ###############################
+mrconvert t13d_$NAME.nii t13d_$NAME.mif 
+5ttgen fsl t13d_$NAME.mif 5tt_nocoreg_$NAME.mif 
+dwiextract dwi_preproc_unbiased_upsampled.mif - -bzero | mrmath - mean mean_b0.mif -axis 3 
+mrconvert mean_b0.mif mean_b0.nii 
+mrconvert 5tt_nocoreg_$NAME.mif 5tt_nocoreg_$NAME.nii 
+fslroi 5tt_nocoreg_$NAME.nii 5tt_vol0.nii 0 1 
+flirt -in mean_b0.nii -ref 5tt_vol0.nii -interp nearestneighbour -dof 6 -omat diff2struct_fsl.mat 
+transformconvert diff2struct_fsl.mat mean_b0.nii 5tt_nocoreg_$NAME.nii flirt_import diff2struct_mrtrix.txt 
+mrtransform 5tt_nocoreg_$NAME.mif -linear diff2struct_mrtrix.txt -inverse 5tt_coreg_$NAME.mif 
+5tt2gmwmi 5tt_coreg_$NAME.mif gmwmSeed_coreg_$NAME.mif 
+
+################################ CREATING THE STREAMLINES ##################################
+tckgen -act 5tt_coreg_$NAME.mif -backtrack -seed_gmwmi gmwmSeed_coreg_$NAME.mif -nthreads 8 -maxlength 250 -cutoff 0.06 -select 10000000 wmfod_norm.mif tracks_10M.tck 
+tcksift2 -act 5tt_coreg_$NAME.mif -out_mu sift_mu.txt -out_coeffs sift_coeffs.txt -nthreads 8 tracks_10M.tck wmfod_norm.mif sift_1M.txt 
+
+############################# STARTING PARCELLATION WITH RECON-ALL #############################
+SUBJECTS_DIR=`pwd` 
+recon-all -i t13d_$NAME.nii -s connectome_recon -all -qcache
+
+############################# CREATING CONNECTIVITY MATRIX #############################
+labelconvert t13d_$NAME/mri/aparc.lobes.mgz $FREESURFER_HOME/FreeSurferColorLUT.txt /usr/local/mrtrix3/share/mrtrix3/labelconvert/fs_default.txt parcels_lobes_$NAME.mif 
+mrtransform parcels_lobes_$NAME.mif -interp nearest -linear diff2struct_mrtrix.txt -inverse -datatype uint32 parcels_coreg_lobes_$NAME.mif
+tck2connectome -symmetric -zero_diagonal -scale_invnodevol -tck_weights_in sift_1M.txt tracks_10M.tck parcels_coreg_lobes_$NAME.mif connectome_parcels_coreg_lobes_$NAME.csv -out_assignment assignments_connectome_parcels_coreg_lobes_$NAME.csv
